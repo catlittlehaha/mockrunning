@@ -6,8 +6,43 @@ import os
 import re
 import shutil
 import subprocess
+import time
+from dataclasses import asdict, dataclass
 
 from .device import LocationDevice
+
+
+@dataclass(frozen=True)
+class AndroidOptions:
+    """Explicit test conditions, not a model of real radio or sensor readings."""
+
+    provider: str = "gps"
+    gps_accuracy: float = 5.0
+    network_accuracy: float = 50.0
+    network_interval: float = 5.0
+
+    @classmethod
+    def parse(cls, value=None):
+        if value is None:
+            return cls()
+        if not isinstance(value, dict) or value.keys() - cls.__dataclass_fields__.keys():
+            raise ValueError("Invalid Android test options")
+        options = asdict(cls()) | value
+        if options["provider"] not in ("gps", "network", "both"):
+            raise ValueError("Android provider must be gps, network or both")
+        for name, maximum in (("gps_accuracy", 10000), ("network_accuracy", 10000),
+                              ("network_interval", 60)):
+            number = options[name]
+            if isinstance(number, bool) or not isinstance(number, (int, float)):
+                raise ValueError(f"{name} must be a number")
+            try:
+                number = float(number)
+            except OverflowError:
+                raise ValueError(f"{name} is out of range") from None
+            if not math.isfinite(number) or not 0.1 <= number <= maximum:
+                raise ValueError(f"{name} must be between 0.1 and {maximum}")
+            options[name] = number
+        return cls(**options)
 
 
 def endpoint(value):
@@ -64,11 +99,19 @@ async def pair(address, code):
 
 class AndroidDevice(LocationDevice):
     # Reuse the CLI route player; all actual device I/O is overridden here.
-    def __init__(self, udid=None, address=None):
+    def __init__(self, udid=None, address=None, options=None):
         self.udid = udid
         self.address = endpoint(address) if address else None
         self.providers = []
         self.original_mode = None
+        self.options = AndroidOptions.parse(options)
+        self.last_updates = {}
+        self.injections = {}
+
+    def diagnostics(self):
+        return {"horizontal_accuracy": True, "sensors": False, "raw_gnss": False,
+                "mock": True, "options": asdict(self.options),
+                "injections": {name: dict(value) for name, value in self.injections.items()}}
 
     async def shell(self, *args):
         if not self.udid:
@@ -98,19 +141,34 @@ class AndroidDevice(LocationDevice):
         self.original_mode = match[1] if match else "default"
         await self.shell("appops", "set", "com.android.shell", "android:mock_location", "allow")
 
-    async def set_point(self, point):
+    async def set_route_point(self, point):
+        return await self.set_point(point, force=False)
+
+    async def set_point(self, point, force=True):
         lat, lon = point.latitude, point.longitude
         if not math.isfinite(lat) or not math.isfinite(lon) or not -90 <= lat <= 90 or not -180 <= lon <= 180:
             raise ValueError("Invalid coordinates")
         if self.original_mode is None:
             raise RuntimeError("Android is not connected")
-        for provider in ("gps", "network"):
+        now = time.monotonic()
+        selected = ("gps", "network") if self.options.provider == "both" else (self.options.provider,)
+        sent = False
+        for provider in selected:
+            # The network test source has its own cadence; never backfill missed updates.
+            if (not force and provider == "network" and provider in self.last_updates
+                    and now - self.last_updates[provider] < self.options.network_interval):
+                continue
             if provider not in self.providers:
                 await self.shell("cmd", "location", "providers", "add-test-provider", provider)
                 self.providers.append(provider)
                 await self.shell("cmd", "location", "providers", "set-test-provider-enabled", provider, "true")
+            accuracy = getattr(self.options, provider + "_accuracy")
             await self.shell("cmd", "location", "providers", "set-test-provider-location", provider,
-                             "--location", f"{lat:.8f},{lon:.8f}", "--accuracy", "3")
+                             "--location", f"{lat:.8f},{lon:.8f}", "--accuracy", str(accuracy))
+            self.last_updates[provider] = time.monotonic()
+            self.injections[provider] = {"lat": lat, "lng": lon, "accuracy_m": accuracy}
+            sent = True
+        return sent
 
     async def clear(self, existing=False):
         if existing:
@@ -121,6 +179,8 @@ class AndroidDevice(LocationDevice):
             try:
                 await self.shell("cmd", "location", "providers", "remove-test-provider", provider)
                 self.providers.remove(provider)
+                self.last_updates.pop(provider, None)
+                self.injections.pop(provider, None)
             except Exception as exc:
                 errors.append(str(exc))
         if errors:

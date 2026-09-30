@@ -21,6 +21,13 @@ log = logging.getLogger(__name__)
 class LocationDevice:
     """Adapter around pymobiledevice3's DVT location service."""
 
+    def diagnostics(self):
+        return {"horizontal_accuracy": False, "sensors": False, "raw_gnss": False,
+                "mock": None, "injections": {}}
+
+    async def set_route_point(self, point):
+        return await self.set_point(point)
+
     def __init__(self, udid: str | None = None, rsd_host: str | None = None, rsd_port: int | None = None) -> None:
         self.udid = udid
         self.rsd_host = rsd_host
@@ -138,12 +145,13 @@ class LocationDevice:
             await self.set_point(points[0])
             if on_point is not None:
                 await on_point(points[0])
-            for start, end in zip(points, points[1:]):
+            for segment, (start, end) in enumerate(zip(points, points[1:]), 1):
                 if speed_kmh is None:
                     if pause_event is not None:
                         await pause_event.wait()
-                    await self.set_point(end)
-                    if on_point is not None:
+                    sender = self.set_point if segment == len(points) - 1 else self.set_route_point
+                    sent = await sender(end)
+                    if on_point is not None and sent is not False:
                         await on_point(end)
                     await asyncio.sleep(interval)
                     continue
@@ -162,8 +170,9 @@ class LocationDevice:
                     point = interpolate(start, end, fraction)
                     sway = lateral * math.sin(math.pi * fraction)
                     point = offset_point(point, -math.sin(bearing) * sway, math.cos(bearing) * sway)
-                    await self.set_point(point)
-                    if on_point is not None:
+                    sender = self.set_point if segment == len(points) - 1 and step == steps else self.set_route_point
+                    sent = await sender(point)
+                    if on_point is not None and sent is not False:
                         await on_point(point)
                     target = started + duration * step / steps
                     await asyncio.sleep(max(0.0, target - time.monotonic()))

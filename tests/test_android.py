@@ -65,7 +65,7 @@ def test_android_lifecycle(monkeypatch):
         device = android.AndroidDevice(address='192.168.1.2:5555')
         await device.connect()
         await device.set_point(Point(31, 121))
-        assert device.providers == ['gps', 'network']
+        assert device.providers == ['gps']
         await device.clear()
         assert device.providers == []
         await device.set_point(Point(32, 122))
@@ -75,6 +75,80 @@ def test_android_lifecycle(monkeypatch):
     asyncio.run(scenario())
     assert calls[0] == ('connect', '192.168.1.2:5555')
     assert any('31.00000000,121.00000000' in call for call in calls)
+    assert not any('network' in call for call in calls)
+
+
+@pytest.mark.parametrize('options', [[], {'unexpected': 1}, {'provider': 'fused'},
+    {'gps_accuracy': float('nan')}, {'network_accuracy': float('inf')},
+    {'gps_accuracy': True}, {'network_interval': 0}, {'network_interval': 61},
+    {'gps_accuracy': '5'}, {'network_accuracy': 10001}, {'gps_accuracy': 10 ** 400}])
+def test_invalid_android_options(options):
+    with pytest.raises(ValueError):
+        create_device('android', android_options=options)
+
+
+def test_ios_rejects_android_options():
+    with pytest.raises(ValueError, match='only supported for Android'):
+        create_device(android_options={})
+
+
+def test_independent_provider_accuracy_and_cadence(monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr(android.time, 'monotonic', lambda: now[0])
+
+    async def scenario():
+        device = android.AndroidDevice('abc', options={'provider':'both', 'gps_accuracy':7,
+            'network_accuracy':80, 'network_interval':5})
+        device.original_mode = 'default'
+        device.shell = AsyncMock(return_value='')
+        await device.set_point(Point(31, 121))
+        assert device.providers == ['gps', 'network']
+        await device.set_route_point(Point(32, 122))
+        diagnostics = device.diagnostics()
+        assert diagnostics['mock'] is True
+        assert diagnostics['sensors'] is False
+        assert diagnostics['raw_gnss'] is False
+        assert diagnostics['injections']['gps']['accuracy_m'] == 7
+        assert diagnostics['injections']['network'] == {'lat':31, 'lng':121, 'accuracy_m':80}
+        now[0] += 5
+        await device.set_route_point(Point(33, 123))
+        assert device.injections['network']['lat'] == 33
+        writes = [c.args for c in device.shell.await_args_list if 'set-test-provider-location' in c.args]
+        assert [c[4] for c in writes] == ['gps', 'network', 'gps', 'gps', 'network']
+        assert writes[0][-1] == '7.0'
+        assert writes[1][-1] == '80.0'
+        await device.clear()
+        assert device.diagnostics()['injections'] == {}
+        await device.set_route_point(Point(34, 124))
+        assert device.injections['network']['lat'] == 34
+    asyncio.run(scenario())
+
+
+def test_network_only_skipped_update_and_manual_override():
+    async def scenario():
+        device = android.AndroidDevice('abc', options={'provider':'network', 'network_interval':60})
+        device.original_mode = 'default'
+        device.shell = AsyncMock(return_value='')
+        assert await device.set_point(Point(31, 121)) is True
+        assert await device.set_route_point(Point(32, 122)) is False
+        assert device.injections['network']['lat'] == 31
+        assert await device.set_point(Point(33, 123)) is True
+        assert device.injections['network']['lat'] == 33
+        assert device.providers == ['network']
+    asyncio.run(scenario())
+
+
+def test_failed_injection_does_not_advance_telemetry():
+    async def scenario():
+        device = android.AndroidDevice('abc')
+        device.original_mode = 'default'
+        device.providers = ['gps']
+        device.shell = AsyncMock(side_effect=RuntimeError('offline'))
+        with pytest.raises(RuntimeError):
+            await device.set_point(Point(31, 121))
+        assert not device.injections
+        assert not device.last_updates
+    asyncio.run(scenario())
 
 
 def test_failed_cleanup_is_retryable():
@@ -120,6 +194,23 @@ def test_cli_android_options():
                                      '--address', '192.168.1.2:5555'])
     assert args.platform == 'android'
     assert args.address == '192.168.1.2:5555'
+    args = build_parser().parse_args(['play', 'route.gpx', '--platform', 'android',
+        '--android-provider', 'both', '--gps-accuracy', '7', '--network-accuracy', '80',
+        '--network-interval', '6'])
+    assert (args.android_provider, args.gps_accuracy, args.network_accuracy, args.network_interval) == ('both', 7, 80, 6)
+
+
+def test_cli_network_route_sends_endpoint():
+    async def scenario():
+        device = android.AndroidDevice('abc', options={'provider':'network', 'network_interval':60})
+        device.original_mode = 'default'
+        device.shell = AsyncMock(return_value='')
+        points = [Point(31, 121), Point(31.000001, 121), Point(31.000002, 121)]
+        callback = AsyncMock()
+        await device.play(points, .001, speed_kmh=300, on_point=callback)
+        assert device.injections['network']['lat'] == points[-1].latitude
+        assert callback.await_count == 2
+    asyncio.run(scenario())
 
 
 def test_adb_subprocess_cancellation(monkeypatch):

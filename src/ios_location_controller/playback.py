@@ -83,6 +83,7 @@ class PlaybackController:
     def _status(self):
         return {"state": self.state, "connected": self.device is not None, "udid": self.udid,
                 "platform": self.platform,
+                "diagnostics": self.device.diagnostics() if self.device and hasattr(self.device, "diagnostics") else None,
                 "devices": self.devices, "discovery_error": self.discovery_error, "error": self.error,
                 "route": {"name": self.name, "points": self._coordinates()},
                 "real_current": self.real_current, "wda_error": self.wda_error,
@@ -92,8 +93,10 @@ class PlaybackController:
                 "total_m": self.motion.total if self.motion else (Motion(self.points, self.settings).total if self.points else 0),
                 "laps": self.motion.laps if self.motion else 0}
 
-    async def _send(self, point):
-        await asyncio.wait_for(self.device.set_point(point), 8)
+    async def _send(self, point, route=False):
+        sender = getattr(self.device, "set_route_point", self.device.set_point) if route else self.device.set_point
+        if await asyncio.wait_for(sender(point), 8) is False:
+            return
         # Last successfully sent simulated coordinate, not a GPS readback.
         self.current = {"lat": point.latitude, "lng": point.longitude}
 
@@ -151,7 +154,7 @@ class PlaybackController:
                         platform = data.get("platform", "ios")
                         device = self.factory(platform=platform, udid=data.get("udid") or None,
                                               rsd_host=data.get("rsd_host"), rsd_port=data.get("rsd_port"),
-                                              address=data.get("address"))
+                                              address=data.get("address"), android_options=data.get("android_options"))
                         self.state = "connecting"
                         self.platform = platform
                         self.device = device
@@ -241,7 +244,7 @@ class PlaybackController:
                 self.pending_time = 0.0
                 try:
                     point, speed, done = self.motion.advance(dt, self.settings)
-                    await self._send(point)
+                    await self._send(point, route=not done)
                     self.speed = 0 if done else speed
                     if done:
                         self.state = "completed"

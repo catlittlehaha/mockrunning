@@ -2,6 +2,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import math
 from pathlib import Path
 from .connections import create_device
 from .android import discover as discover_android, pair
@@ -10,7 +11,7 @@ from .gpx import load_points
 
 def positive_float(value: str) -> float:
     number = float(value)
-    if number <= 0:
+    if not math.isfinite(number) or number <= 0:
         raise argparse.ArgumentTypeError("must be greater than zero")
     return number
 
@@ -24,7 +25,7 @@ def percentage(value: str) -> float:
 
 def nonnegative_float(value: str) -> float:
     number = float(value)
-    if number < 0:
+    if not math.isfinite(number) or number < 0:
         raise argparse.ArgumentTypeError("must not be negative")
     return number
 
@@ -37,6 +38,21 @@ def build_parser() -> argparse.ArgumentParser:
     pairing.add_argument("address", help="Pairing IP:port, not the debugging port")
     validate = sub.add_parser("validate")
     validate.add_argument("route", type=Path)
+    emulator = sub.add_parser("emulator", help="Explicit Android AVD test inputs (not physical phones)")
+    emulator.add_argument("--serial", required=True, help="Running AVD serial, e.g. emulator-5554")
+    emu_commands = emulator.add_subparsers(dest="emulator_command", required=True)
+    fix = emu_commands.add_parser("fix", help="GPS fix with a satellite-count test parameter, not raw GNSS")
+    fix.add_argument("--latitude", type=float, required=True)
+    fix.add_argument("--longitude", type=float, required=True)
+    fix.add_argument("--altitude", type=float, default=0)
+    fix.add_argument("--satellites", type=int, default=8)
+    fix.add_argument("--speed-kmh", type=nonnegative_float, default=0)
+    sensor = emu_commands.add_parser("sensor", help="Temporary sensor values, restored after duration")
+    from .emulator import SENSORS
+    sensor.add_argument("name", choices=SENSORS)
+    for axis in ("x", "y", "z"):
+        sensor.add_argument("--" + axis, type=float, required=True)
+    sensor.add_argument("--duration", type=positive_float, default=1)
     play = sub.add_parser("play")
     play.add_argument("route", type=Path)
     play.add_argument("--udid")
@@ -46,6 +62,10 @@ def build_parser() -> argparse.ArgumentParser:
     play.add_argument("--lateral-variation-m", type=nonnegative_float, default=0.0, help="Left/right sway amplitude in meters")
     play.add_argument("--random-seed", type=int, help="Optional seed for repeatable movement variation")
     play.add_argument("--loop", action="store_true")
+    play.add_argument("--android-provider", choices=["gps", "network", "both"], default="gps")
+    play.add_argument("--gps-accuracy", type=positive_float, default=5.0, help="Android test hAcc in meters")
+    play.add_argument("--network-accuracy", type=positive_float, default=50.0, help="Android network test hAcc in meters")
+    play.add_argument("--network-interval", type=positive_float, default=5.0, help="Android network test update interval")
     play.add_argument("--rsd-host", help="RSD host printed by pymobiledevice3 remote start-tunnel")
     play.add_argument("--rsd-port", type=int, help="RSD port printed by pymobiledevice3 remote start-tunnel")
     clear = sub.add_parser("clear")
@@ -61,6 +81,16 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 async def run(args: argparse.Namespace) -> None:
+    if args.command == "emulator":
+        from .emulator import Emulator
+        emulator = Emulator(args.serial)
+        if args.emulator_command == "fix":
+            await emulator.fix(args.latitude, args.longitude, args.altitude, args.satellites, args.speed_kmh)
+            print("AVD GPS fix sent (satellite count is a test input, not raw GNSS; mock status is unchanged)")
+        else:
+            await emulator.sensor(args.name, args.x, args.y, args.z, args.duration)
+            print("AVD sensor test completed; original sensor values restored")
+        return
     if args.command == "list":
         if args.platform == "android":
             for device in await discover_android():
@@ -86,7 +116,12 @@ async def run(args: argparse.Namespace) -> None:
     rsd_port = getattr(args, "rsd_port", None)
     if (rsd_host is None) != (rsd_port is None):
         raise ValueError("--rsd-host and --rsd-port must be used together")
-    device = create_device(args.platform, getattr(args, "udid", None), rsd_host, rsd_port, args.address)
+    options = None
+    if args.platform == "android" and args.command == "play":
+        options = {"provider": args.android_provider, "gps_accuracy": args.gps_accuracy,
+                   "network_accuracy": args.network_accuracy, "network_interval": args.network_interval}
+    device = create_device(args.platform, getattr(args, "udid", None), rsd_host, rsd_port,
+                           args.address, android_options=options)
     try:
         await device.connect()
         if args.command == "clear":

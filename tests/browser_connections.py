@@ -70,6 +70,10 @@ def main():
             page.locator('#platform').select_option('android')
             expect(page.locator('#android-wireless')).to_be_visible()
             expect(page.locator('#ios-wireless')).to_be_hidden()
+            expect(page.locator('#android-test-options')).to_be_visible()
+            page.locator('#android-provider').select_option('both')
+            page.locator('#gps-accuracy').fill('7')
+            page.locator('#network-accuracy').fill('80')
             page.locator('#adb-address').fill('192.168.1.2:5555')
             page.locator('#android-wireless summary').click()
             page.locator('#pair-address').fill('192.168.1.2:12345')
@@ -82,7 +86,9 @@ def main():
             page.locator('#connect').click()
             expect(page.locator('#connect')).to_be_enabled()
             assert server.controller.calls[-1] == ('connect', {
-                'platform':'android', 'address':'192.168.1.2:5555'})
+                'platform':'android', 'address':'192.168.1.2:5555',
+                'android_options':{'provider':'both', 'gps_accuracy':7,
+                                   'network_accuracy':80, 'network_interval':5}})
             page.set_viewport_size({'width':390, 'height':844})
             assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
             Path('artifacts').mkdir(exist_ok=True)

@@ -144,6 +144,12 @@ function renderStatus(data) {
   }
   $('device-state').textContent = data.connected ? '定位服务已连接' : data.state === 'connecting' ? '正在建立定位连接…' : '尚未连接定位服务';
   $('device-help').textContent = data.error || data.discovery_error || data.wda_error || '发现 USB 手机不等于已连接定位服务。';
+  const diagnostics = data.diagnostics;
+  $('capability-help').textContent = diagnostics?.mock === true
+    ? 'Android 测试定位：系统 mock 标记保留；陀螺仪、加速度计及卫星原始数据未模拟。不保证融合定位采用测试源。'
+    : 'iOS / 未连接：当前接口不提供 hAcc 设置、系统传感器或卫星原始数据注入；不保证第三方应用接受模拟位置。';
+  $('injection-status').textContent = Object.entries(diagnostics?.injections || {}).map(([name, point]) =>
+    `${name}: ${point.lat.toFixed(6)}, ${point.lng.toFixed(6)} · 测试 hAcc ${point.accuracy_m} m`).join(' / ');
   const states = {idle:'等待连接',ready:'准备就绪',playing:'正在移动',paused:'已暂停',completed:'已到达终点',error:'运行错误',connecting:'连接中'};
   $('play-state').textContent = states[data.state] || data.state;
   $('live-speed').textContent = `${data.speed_kmh.toFixed(2)} km/h`;
@@ -221,6 +227,7 @@ function connectionOptions() {
   const wireless = $('transport').value === 'wireless', android = $('platform').value === 'android';
   $('ios-wireless').hidden = !wireless || android;
   $('android-wireless').hidden = !wireless || !android;
+  $('android-test-options').hidden = !android;
   $('devices').hidden = wireless;
   $('connection-help').textContent = android
     ? '需要 ADB 和已授权设备；自动检测系统测试定位接口（建议 Android 12+）。无需 root/APK，不支持的 ROM 会明确报错。'
@@ -238,6 +245,14 @@ $('pair-device').onclick = () => operation('正在配对 Android…', async () =
 });
 $('connect').onclick=()=>operation('正在建立手机定位连接…',async()=>{
   const data = {platform:$('platform').value};
+  if (data.platform === 'android') {
+    for (const input of $('android-test-options').querySelectorAll('input')) {
+      if (!input.value || !input.reportValidity()) throw new Error('请输入有效的 Android 测试参数');
+    }
+    data.android_options = {provider:$('android-provider').value,
+      gps_accuracy:Number($('gps-accuracy').value), network_accuracy:Number($('network-accuracy').value),
+      network_interval:Number($('network-interval').value)};
+  }
   if ($('transport').value === 'auto') data.udid = $('devices').value;
   else if (data.platform === 'android') {
     data.address = $('adb-address').value.trim();

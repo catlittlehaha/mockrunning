@@ -124,3 +124,42 @@ def test_clear_loaded_route_keeps_route_on_device_failure(tmp_path):
         assert controller.status()['route']['points'] == points
     finally:
         controller.close()
+
+
+def test_network_telemetry_reports_only_successful_updates(tmp_path):
+    from unittest.mock import AsyncMock
+    from ios_location_controller.android import AndroidDevice
+
+    options = []
+
+    def factory(**kwargs):
+        options.append(kwargs['android_options'])
+        device = AndroidDevice('test', options=kwargs['android_options'])
+        device.original_mode = 'default'
+        device.connect = AsyncMock()
+        device.shell = AsyncMock(return_value='')
+        return device
+
+    controller = PlaybackController(tmp_path/'network.json', factory)
+    config = {'provider':'network', 'network_interval':60, 'network_accuracy':90}
+    try:
+        controller.call('route', {'points':[{'lat':31,'lng':121}, {'lat':32,'lng':122}]})
+        controller.call('settings', {'interval':.1})
+        result = controller.call('connect', {'platform':'android', 'android_options':config})
+        assert options == [config]
+        assert result['diagnostics']['mock'] is True
+        assert result['diagnostics']['injections']['network']['accuracy_m'] == 90
+        controller.call('start')
+        time.sleep(.25)
+        result = controller.call('pause')
+        assert result['distance_m'] > 0
+        assert result['current'] == {'lat':31,'lng':121}
+        result = controller.call('position', {'lat':33, 'lng':123})
+        assert result['current'] == {'lat':33,'lng':123}
+        assert result['diagnostics']['injections']['network']['lat'] == 33
+        result = controller.call('stop')
+        assert result['diagnostics']['injections'] == {}
+        result = controller.call('disconnect')
+        assert result['diagnostics'] is None
+    finally:
+        controller.close()
