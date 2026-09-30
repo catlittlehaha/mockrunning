@@ -213,6 +213,65 @@ def test_cli_network_route_sends_endpoint():
     asyncio.run(scenario())
 
 
+LOCATION_HELP = 'Location service commands:\n  providers\n    set-test-provider-location <PROVIDER>\n'
+
+
+@pytest.mark.parametrize('returncode', [0, -1, 255])
+@pytest.mark.parametrize('supported', [True, False])
+def test_connect_accepts_normal_nonzero_location_help(monkeypatch, returncode, supported):
+    calls = []
+    help_text = LOCATION_HELP if supported else 'Location service commands:\n  help\n'
+
+    async def subprocess(*args, **kwargs):
+        calls.append(args)
+        code, output = 0, ''
+        if args[-1] == 'get-state':
+            output = 'device'
+        elif args[-3:] == ('cmd', 'location', 'help'):
+            code, output = returncode, help_text
+        elif args[-1] == 'is-location-enabled':
+            output = 'true'
+        elif args[-4:] == ('appops', 'get', 'com.android.shell', 'android:mock_location'):
+            output = 'MOCK_LOCATION: ignore'
+        return type('Process', (), {
+            'returncode': code,
+            'communicate': AsyncMock(return_value=(output.encode(), b'')),
+        })()
+
+    monkeypatch.setenv('ADB_PATH', 'adb')
+    monkeypatch.setattr(android.asyncio, 'create_subprocess_exec', subprocess)
+    device = android.AndroidDevice('abc')
+    if supported:
+        asyncio.run(device.connect())
+        assert device.original_mode == 'ignore'
+    else:
+        with pytest.raises(RuntimeError, match='lacks ADB test-provider support'):
+            asyncio.run(device.connect())
+        assert device.original_mode is None
+        assert not any('appops' in call for call in calls)
+
+
+@pytest.mark.parametrize('command, returncode, stdout, stderr', [
+    (('cmd', 'location', 'help'), 1, LOCATION_HELP, ''),
+    (('cmd', 'location', 'help'), 255, 'Unknown command: location', ''),
+    (('cmd', 'location', 'help'), 255, '', ''),
+    (('cmd', 'location', 'help'), 255, LOCATION_HELP, 'error: device unauthorized'),
+    (('cmd', 'location', 'help'), 255, LOCATION_HELP, 'Permission denied'),
+    (('cmd', 'location', 'help'), 0, '', 'SecurityException: permission denied'),
+    (('cmd', 'location', 'help'), 255, LOCATION_HELP + 'Exception occurred', ''),
+    (('cmd', 'location', 'providers', 'add-test-provider', 'gps'), 255, LOCATION_HELP, ''),
+])
+def test_adb_help_exception_does_not_hide_failures(monkeypatch, command, returncode, stdout, stderr):
+    process = type('Process', (), {
+        'returncode': returncode,
+        'communicate': AsyncMock(return_value=(stdout.encode(), stderr.encode())),
+    })()
+    monkeypatch.setenv('ADB_PATH', 'adb')
+    monkeypatch.setattr(android.asyncio, 'create_subprocess_exec', AsyncMock(return_value=process))
+    with pytest.raises(RuntimeError):
+        asyncio.run(android.adb('-s', 'abc', 'shell', *command))
+
+
 def test_adb_subprocess_cancellation(monkeypatch):
     class Process:
         returncode = None

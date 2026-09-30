@@ -77,7 +77,19 @@ async def adb(*args, input_text=None):
         await process.communicate()
         raise
     text = (out + err).decode("utf-8", errors="replace").strip()
-    if process.returncode or any(s in text.lower() for s in
+    # Android's default shell help handler returns -1 (usually 255 via adb)
+    # even after successfully printing help. Only accept that result for this
+    # read-only probe, with a recognizable help header and no stderr output.
+    normal_location_help = (
+        len(args) == 6
+        and args[0] == "-s"
+        and args[2:] == ("shell", "cmd", "location", "help")
+        and process.returncode in (-1, 255)
+        and not err.strip()
+        and re.search(r"(?m)^Location service commands:[ \t]*\r?$",
+                      out.decode("utf-8", errors="replace")) is not None
+    )
+    if (process.returncode and not normal_location_help) or any(s in text.lower() for s in
             ("error:", "exception", "failed", "cannot connect", "unknown command")):
         # Pairing codes must not be reflected into status or logs.
         raise RuntimeError("ADB pairing failed" if input_text else text[:500] or "ADB command failed")
